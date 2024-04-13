@@ -1,0 +1,722 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2639
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 import org.optaplanner.core.api.score.buildin.bendable.BendableScoreHolder;\
+\
+import com.drift.serafina.domain.planner.ProducerO;\
+import com.drift.serafina.domain.planner.ProductionO;\
+\
+import com.drift.serafina.domain.planner.TerminalO;\
+import com.drift.serafina.domain.planner.NominationO;\
+\
+import com.drift.serafina.domain.planner.Truck_CoO;\
+import com.drift.serafina.domain.planner.TruckRouteO;\
+import com.drift.serafina.domain.planner.HaulO;\
+\
+import com.drift.serafina.domain.planner.TerminalDailyO;\
+import com.drift.serafina.domain.planner.TruckDailyO;\
+import com.drift.serafina.domain.planner.TruckTerminalDailyO;\
+import com.drift.serafina.domain.planner.OneTruckCoToTerminalO;\
+import com.drift.serafina.domain.planner.Position;\
+import com.drift.serafina.domain.planner.SalesTargetO;\
+import com.drift.serafina.domain.PlanningConstraint;\
+\
+import com.drift.serafina.solver.drools.ProducerTerminalDailyTotal;\
+import com.drift.serafina.solver.drools.TruckDailyTotal;\
+import com.drift.serafina.solver.drools.TruckMonthTotal;\
+\
+import com.drift.serafina.solver.drools.TerminalDailyTotal;\
+import com.drift.serafina.solver.drools.TerminalMonthTotal;\
+import com.drift.serafina.solver.drools.TruckRouteMonthTotal;\
+\
+import com.drift.serafina.solver.drools.ProducerTerminalTarget;\
+\
+import java.time.LocalDate;\
+import java.time.temporal.ChronoUnit;\
+\
+global BendableScoreHolder scoreHolder;\
+\
+// ############################################################################\
+// Hard constraints\
+// ############################################################################\
+\
+rule "hauledMoreThanProducedDaily"\
+  when\
+     PlanningConstraint( name.equals("hauledMoreThanProducedDaily"), active);\
+     $producer : ProducerO();\
+     $planningDate : LocalDate();\
+     ProductionO($producer==producer, $date:date, $produced : actual, !date.isBefore($planningDate))\
+     not SalesTargetO($producer==producer, $date.equals(date))\
+      accumulate(\
+         HaulO( $producer==truckRoute.producer, $date.equals(date),volume !=null,\
+              $value : volume );\
+            $total : sum($value);\
+            $total > $produced + 50\
+        )\
+  then\
+    int score =  ($produced+50) - $total;\
+    scoreHolder.addHardConstraintMatch(kcontext, 0, -score*score);  \
+end\
+\
+rule "producedMoreThanHauledDaily"\
+  when\
+       PlanningConstraint( name.equals("producedMoreThanHauledDaily"), active);\
+  \
+    $producer : ProducerO();\
+    $planningDate : LocalDate();\
+    \
+     ProductionO($producer==producer, $date:date, $produced : actual, !date.isBefore($planningDate))\
+       not SalesTargetO($producer==producer, $date.equals(date))\
+     \
+      accumulate(\
+         HaulO( $producer==truckRoute.producer, $date.equals(date),volume !=null,\
+              $value : volume );\
+            $total : sum($value);\
+            $total < $produced - 50\
+        )\
+  then\
+    int score = $total - ($produced-50);\
+    scoreHolder.addHardConstraintMatch(kcontext, 0, -score*score ); \
+end\
+\
+\
+rule "terminalSalesBelowPosition"\
+    when      \
+      PlanningConstraint( name.equals("terminalSalesBelowPosition"), active);\
+      $planningDate : LocalDate();  \
+    \
+      $terminal : TerminalO( $adjustedPosition: adjustedPosition);\
+      accumulate(\
+        HaulO(  date.isBefore($planningDate), $terminal== truckRoute.terminal, volume !=null, $value : volume );\
+          $haulPreTotal : sum($value)\
+        )\
+        \
+      accumulate(\
+        HaulO( !date.isBefore($planningDate), $terminal== truckRoute.terminal, volume !=null, $value : volume );\
+          $haulPostTotal : sum($value);\
+          $haulPostTotal < Math.min( 0, $adjustedPosition  - $haulPreTotal)\
+        )  \
+    then\
+       int score = (int)(($haulPostTotal - $adjustedPosition - $haulPreTotal) / 11);\
+       scoreHolder.addSoftConstraintMatch(kcontext, 0, -Math.min(50000000,score*score));\
+end\
+\
+rule "terminalSalesAbovePosition"\
+    when\
+      PlanningConstraint( name.equals("terminalSalesAbovePosition"), active);\
+      $planningDate : LocalDate();  \
+      $terminal : TerminalO( $adjustedPosition: adjustedPosition);\
+      accumulate(\
+        HaulO(  date.isBefore($planningDate), $terminal== truckRoute.terminal, volume !=null, $value : volume );\
+          $haulPreTotal : sum($value)\
+        )\
+        \
+      accumulate(\
+        HaulO( !date.isBefore($planningDate), $terminal== truckRoute.terminal, volume !=null, $value : volume );\
+          $haulPostTotal : sum($value);\
+          $haulPostTotal  > Math.max( 0, $adjustedPosition - $haulPreTotal)\
+        )\
+     then\
+       int score = (int)((($adjustedPosition - $haulPreTotal ) - $haulPostTotal  )/10);\
+       scoreHolder.addSoftConstraintMatch(kcontext, 0, -score*score);\
+end\
+\
+rule "terminalSalesAboveHardTarget"\
+    when    \
+      $terminal : TerminalO();\
+      $nomination: NominationO( $terminal == terminal, target != null, $target : target)\
+      accumulate(\
+         HaulO( $terminal== truckRoute.terminal, volume !=null, $value : volume );\
+            $haultotal : sum($value);\
+            $haultotal >  $target\
+        )\
+     then\
+       int score = (int)($target - $haultotal );\
+       scoreHolder.addHardConstraintMatch(kcontext, 0, score);\
+end\
+\
+rule "nominationZero"\
+  when\
+    PlanningConstraint( name.equals("nominationZero"), active);\
+    $planningDate : LocalDate();  \
+    $terminal : TerminalO( adjustedPosition == 0)\
+    HaulO( !date.isBefore($planningDate), $terminal== truckRoute.terminal, volume !=null, volume > 0 );\
+  then\
+    scoreHolder.addHardConstraintMatch(kcontext, 0, -17);\
+end\
+\
+rule "TerminalLimitLow"\
+  when\
+    PlanningConstraint( name.equals("TerminalLimitLow"), active);  \
+    $planningDate : LocalDate();\
+    $terminal : TerminalO( $minVolume : minimumVolume)  \
+    ProductionO(  producer.id == 2L, $date:date, !date.isBefore($planningDate) )\
+            \
+    not TerminalDailyO($terminal == terminal, !($date.isBefore(date) || $date.isAfter(untilDate)) )\
+        \
+    accumulate(\
+        HaulO( $terminal == truckRoute.terminal, $date.equals(date), volume !=null,\
+              $value : volume );\
+        $total : sum($value);\
+        ($total + 30) < $minVolume\
+        )                           \
+  then\
+    scoreHolder.addSoftConstraintMatch(kcontext, 0, -($total - $minVolume)*($total - $minVolume) - 4);      \
+end\
+\
+rule "TerminalLimitHigh"\
+  when\
+    PlanningConstraint( name.equals("TerminalLimitHigh"), active); \
+    $planningDate : LocalDate();\
+    $terminal : TerminalO($maxVolume : maximumVolume)\
+    ProductionO(  producer.id == 1L, $date:date, !date.isBefore($planningDate) )\
+    \
+    not TerminalDailyO($terminal == terminal, !($date.isBefore(date) || $date.isAfter(untilDate)) )\
+        \
+    accumulate(\
+         HaulO( $terminal == truckRoute.terminal, $date.equals(date),volume !=null,\
+              $value : volume );\
+        $total : sum($value);\
+        ($total - 30) > $maxVolume\
+        )               \
+  then\
+      scoreHolder.addHardConstraintMatch(kcontext, 0, -($maxVolume-$total)*($maxVolume-$total) - 5);    \
+end\
+\
+rule "TruckLimitZero"\
+  when\
+    PlanningConstraint( name.equals("TruckLimitZero"), active);\
+  \
+    $planningDate : LocalDate();\
+    $truck : Truck_CoO( capacity == 0 )\
+    HaulO( $truck == truckRoute.truck, !date.isBefore($planningDate),volume !=null, volume > 0, $value : volume, $date :  date )\
+    not TruckDailyO($truck == truck, !($date.isBefore(date) || $date.isAfter(untilDate)) )           \
+  then\
+    scoreHolder.addHardConstraintMatch(kcontext, 0, -$value + 1);   \
+end\
+\
+rule "TruckLimitLow"\
+  when\
+    PlanningConstraint( name.equals("TruckLimitLow"), active);\
+    $planningDate : LocalDate();\
+    $truck : Truck_CoO( $minPercentage : minimumVolume)\
+    ProductionO(  producer.id == 2, $date:date, !date.isBefore($planningDate) )\
+    not TruckDailyO($truck == truck, !($date.isBefore(date) || $date.isAfter(untilDate)))\
+\
+    accumulate(     \
+         ProductionO( $date.equals(date), $actual : actual );\
+            $prodTotal : sum($actual)\
+        )           \
+        \
+    accumulate(     \
+         HaulO( $truck == truckRoute.truck, $date.equals(date),volume !=null,\
+              $value : volume );\
+            $total : sum($value);\
+            $total * 100 < $minPercentage * $prodTotal\
+        )            \
+    then\
+      int difference = ($total*100-$minPercentage* $prodTotal)/1000;\
+      scoreHolder.addSoftConstraintMatch(kcontext, 0, -difference*difference);    \
+end\
+\
+rule "TruckLimitHigh"\
+  when\
+    PlanningConstraint( name.equals("TruckLimitHigh"), active);\
+    $planningDate : LocalDate();\
+    $truck : Truck_CoO( $maxPercentage : capacity)\
+    ProductionO(  producer.id == 2, $date:date, !date.isBefore($planningDate) )\
+    not TruckDailyO($truck == truck, !($date.isBefore(date) || $date.isAfter(untilDate)) )\
+    \
+    accumulate(     \
+         ProductionO( $date.equals(date), $actual : actual );\
+            $prodTotal : sum($actual)\
+        )           \
+    \
+    accumulate(     \
+         HaulO( $truck == truckRoute.truck, $date.equals(date),volume !=null,\
+              $value : volume );\
+            $total : sum($value);\
+            $total * 100 > $maxPercentage * $prodTotal\
+        )           \
+  then\
+   int difference = ($total*100-$maxPercentage* $prodTotal)/1000;\
+      scoreHolder.addSoftConstraintMatch(kcontext, 0, -difference*difference);    \
+end\
+\
+// scale the volume across the facility - hauler combinations\
+rule "ScaleVolumeByTruckCoProducerLow"\
+  when\
+   // PlanningConstraintO( name.equals("ScaleVolumeByTruckCoProducer"), active);\
+    $planningDate : LocalDate();\
+    $truck : Truck_CoO($min:minimumVolume, $max:capacity);\
+    $producer : ProducerO();\
+    \
+    ProductionO($producer==producer, $date:date, $produced : actual, !date.isBefore($planningDate))\
+\
+    accumulate(\
+         HaulO( $producer==truckRoute.producer, $truck == truckRoute.truck, \
+            $date.equals(date), volume !=null, $value : volume );\
+            $total : sum($value);\
+            ($total+40) * 100 < $produced * $min  \
+        )    \
+  then\
+    int score =  (($total+40) * 100 - $produced * $min)  / 100;\
+    scoreHolder.addSoftConstraintMatch(kcontext, 0, score);  \
+end \
+\
+rule "ScaleVolumeByTruckCoProducerHigh"\
+  when\
+   // PlanningConstraintO( name.equals("ScaleVolumeByTruckCoProducer"), active);\
+    $planningDate : LocalDate();\
+    $truck : Truck_CoO($min:minimumVolume, $max:capacity);\
+    $producer : ProducerO();\
+    \
+    ProductionO($producer==producer, $date:date, $produced : actual, !date.isBefore($planningDate))\
+\
+    accumulate(\
+         HaulO( $producer==truckRoute.producer, $truck == truckRoute.truck, \
+            $date.equals(date), volume !=null, $value : volume );\
+            $total : sum($value);\
+            ($total - 40) * 100 > $produced * $max   \
+        )    \
+  then\
+    int score =($produced * $max  - ($total-40)*100)  / 100;\
+    scoreHolder.addSoftConstraintMatch(kcontext, 0, score);  \
+end \
+//*\
+rule "ScaleVolumeByTruckCoTerminalLow"\
+  when\
+   // PlanningConstraintO( name.equals("ScaleVolumeByTruckCoTerminalLow"), active);\
+    $planningDate : LocalDate();\
+    $truck : Truck_CoO($min:minimumVolume, $max:capacity);\
+    $terminal : TerminalO();\
+    TerminalDailyTotal($terminal==terminal, $date:date, $received : total, !date.isBefore($planningDate))\
+    accumulate(\
+         HaulO( $terminal==truckRoute.terminal, $truck == truckRoute.truck, \
+            $date.equals(date), volume !=null, $value : volume );\
+            $total : sum($value);\
+            ($total+40) * 100 < $received * $min  \
+        )    \
+  then\
+    int score =  (($total+40) * 100 - $received * $min)  / 100;\
+    scoreHolder.addSoftConstraintMatch(kcontext, 0, score);  \
+end \
+\
+rule "ScaleVolumeByTruckCoTerminalHigh"\
+  when\
+   // PlanningConstraintO( name.equals("ScaleVolumeByTruckCoTerminalLow"), active);\
+    $planningDate : LocalDate();\
+    $truck : Truck_CoO($min:minimumVolume, $max:capacity);\
+    $terminal : TerminalO();\
+    TerminalDailyTotal($terminal==terminal, $date:date, $received : total, !date.isBefore($planningDate))\
+\
+    accumulate(\
+         HaulO( $terminal==truckRoute.terminal, $truck == truckRoute.truck, \
+            $date.equals(date), volume !=null, $value : volume );\
+            $total : sum($value);\
+            ($total - 40) * 100 > $received * $max   \
+        )    \
+  then\
+    int score =($received * $max  - ($total-40)*100)  / 100;\
+    scoreHolder.addSoftConstraintMatch(kcontext, 0, score);  \
+end \
+\
+//*\
+rule "TerminalDaily"\
+  when\
+    PlanningConstraint( name.equals("TerminalDaily"), active);\
+    $planningDate : LocalDate();\
+    $terminal : TerminalO();\
+    \
+    TerminalDailyTotal( terminal == $terminal, $date: date, $total : total, !date.isBefore($planningDate))\
+    TerminalDailyO( $terminal == terminal,  $total < minVolume || $total > maxVolume, \
+       $minVolume : minVolume,  $maxVolume : maxVolume\
+       , $startDate : date, $endDate : untilDate\
+      , !($date.isBefore(date) || $date.isAfter(untilDate)) \
+     \
+      )         \
+  then\
+   // System.out.println( "total "+$total+" "+$minVolume+" "+ $maxVolume+ " " + $date+" "+$startDate +" " + $endDate);\
+    int score = Math.min( $total - $minVolume,  $maxVolume - $total);\
+    scoreHolder.addHardConstraintMatch(kcontext, 0, score+2);     \
+end\
+\
+rule "TruckTerminalDaily"\
+  when\
+    PlanningConstraint( name.equals("TruckTerminalDaily"), active);\
+    $planningDate : LocalDate();\
+    $truck: Truck_CoO()\
+    $terminal : TerminalO();\
+    ProductionO(  producer.id == 1, $date:date, !date.isBefore($planningDate))\
+    \
+    TruckTerminalDailyO( $truck == truck, $terminal == terminal,  $minVolume : minVolume,  $maxVolume : maxVolume, \
+        !($date.isBefore(date) || $date.isAfter(untilDate)) )\
+  \
+    accumulate(\
+         HaulO( $truck == truckRoute.truck, $terminal == truckRoute.terminal, $date.equals(date),volume !=null,\
+              $value : volume );\
+            $total : sum($value);\
+            $total < $minVolume || $total > $maxVolume\
+        )               \
+  then\
+    int score = Math.min( $total - $minVolume,  $maxVolume - $total);\
+    scoreHolder.addHardConstraintMatch(kcontext, 0, score+3);     \
+end\
+\
+rule "TruckDaily"\
+  when\
+    PlanningConstraint( name.equals("TruckDaily"), active);\
+    $planningDate : LocalDate();\
+    $truck: Truck_CoO()\
+    \
+    TruckDailyTotal( $truck == truck, $date : date, $total : total, !date.isBefore($planningDate))\
+    TruckDailyO( $truck == truck, $total < minVolume || $total > maxVolume, $minVolume : minVolume, $maxVolume : maxVolume,\
+    !($date.isBefore(date) || $date.isAfter(untilDate)))\
+            \
+  then\
+      int score = Math.min( $total - $minVolume,  $maxVolume - $total);\
+      scoreHolder.addHardConstraintMatch(kcontext, 0, score+4);   \
+end\
+\
+rule "ProducerShutdown"\
+  when\
+    PlanningConstraint( name.equals("ProducerShutdown"), active);  \
+    $planningDate : LocalDate();\
+    ProductionO( $producer:producer, $date:date, actual == 0, !date.isBefore($planningDate))\
+    HaulO( $date.equals(date), truckRoute.producer== $producer,volume !=null, volume > 0 );         \
+  then\
+    scoreHolder.addHardConstraintMatch(kcontext, 0, -10);   \
+end\
+//TruckToTerminal rules\
+rule "HuskyCmtOnly"\
+  when\
+    PlanningConstraint( name.equals("HuskyCmtOnly"), active);  \
+    $planningDate : LocalDate();\
+    HaulO( truckRoute.terminal.name.contains("Husky"), !truckRoute.truck.name.contains("CRUDE"), volume !=null, volume > 0, $volume:volume, !date.isBefore($planningDate));            \
+  then\
+    scoreHolder.addHardConstraintMatch(kcontext, 0,  -$volume); \
+end\
+\
+rule "PlainsUnityBySORE"\
+  when\
+    PlanningConstraint( name.equals("PlainsUnityBySORE"), active);  \
+    $planningDate : LocalDate();\
+    HaulO( truckRoute.terminal.name.contains("Plains Unity"), !truckRoute.truck.name.contains("S.O.R.E."), volume !=null, volume > 0, $volume:volume, !date.isBefore($planningDate));            \
+  then\
+    scoreHolder.addHardConstraintMatch(kcontext, 0,  -$volume-7); \
+end\
+\
+rule "HuskyOnlyMeota"\
+  when   \
+    PlanningConstraint( name.equals("HuskyOnlyMeota"), active);\
+    $planningDate : LocalDate();\
+    HaulO( truckRoute.terminal.name.contains("Husky"), !truckRoute.producer.name.contains("Meota"), volume !=null,volume > 0, $volume:volume, !date.isBefore($planningDate));            \
+  then\
+    scoreHolder.addHardConstraintMatch(kcontext, 0,  -$volume-12); \
+end\
+\
+//slow rules\
+rule "TerminalDailyTotal" salience 3\
+  when\
+    ProductionO(  producer.id == 1, $date:date )\
+    $terminal: TerminalO()\
+    accumulate(\
+        HaulO( $date.isEqual(date), truckRoute.terminal == $terminal, volume !=null, $value : volume);\
+        $total : sum($value)\
+    )\
+  then\
+   insertLogical(new TerminalDailyTotal( $terminal, $date, (int)($total)));\
+end\
+\
+rule "TruckDailyTotal" salience 3\
+  when\
+    ProductionO(  producer.id == 2, $date:date)\
+    $truck: Truck_CoO()\
+    accumulate(\
+        HaulO( $date.isEqual(date), truckRoute.truck == $truck, volume !=null, $value : volume);\
+        $total : sum($value)\
+    )\
+  then\
+    insertLogical(new TruckDailyTotal( $truck, $date, (int)($total)));\
+end\
+\
+rule "TruckMonthTotal" salience 2\
+  when\
+    $truck: Truck_CoO()\
+    accumulate(\
+        HaulO(  truckRoute.truck == $truck, volume !=null, $value : volume);\
+        $total : sum($value)\
+    )\
+     accumulate(\
+        TruckDailyTotal( truck == $truck, total > 0);\
+        $count : sum(1);\
+        $count > 0\
+    )\
+  then  \
+    int totalByCount = (int)($total/$count);\
+//  System.out.println( $truck.getName()+": "+ $count +" days, "+ $total + " total");\
+    insertLogical(new TruckMonthTotal( $truck, totalByCount));\
+end\
+\
+rule "TerminalMonthTotal" salience 2\
+  when\
+    $terminal: TerminalO()\
+    accumulate(\
+        HaulO(  truckRoute.terminal == $terminal, volume !=null, $value : volume);\
+        $total : sum($value)\
+    )\
+     accumulate(\
+        TerminalDailyTotal( terminal == $terminal, total > 0);\
+        $count : sum(1);\
+        $count > 0\
+    )\
+  then\
+//    System.out.println( $terminal.getName()+": "+ $count +" days, "+ $total + " total");\
+    int totalByCount = (int)($total/$count);\
+\
+    insertLogical(new TerminalMonthTotal( $terminal, totalByCount));\
+end\
+\
+rule "TruckRouteMonthTotal" salience -1\
+  when\
+    $truckRoute: TruckRouteO()\
+    accumulate(\
+        HaulO(  truckRoute == $truckRoute, volume !=null, $value : volume);\
+        $avg : average($value)\
+    )\
+  then\
+    int score = $avg.intValue();\
+    insertLogical(new TruckRouteMonthTotal( $truckRoute, score));\
+end\
+\
+\
+rule "TerminalProducerDailyTotal"\
+  when\
+    $planningDate : LocalDate();\
+    ProductionO( $producer : producer, $date:date, !date.isBefore($planningDate) )\
+    $terminal: TerminalO( )\
+    accumulate(\
+        HaulO( $date.isEqual(date), truckRoute.terminal == $terminal, truckRoute.producer== $producer,volume !=null, $value : volume);\
+        $total : sum($value)\
+    )\
+  then\
+    insertLogical(new ProducerTerminalDailyTotal( $producer, $terminal, $date,(int)($total*0.4), (int)($total*0.5)));\
+end\
+\
+rule "TruckingRatioCMT"\
+  when\
+    PlanningConstraint( name.equals("TruckingRatioCMT"), active);\
+    ProducerTerminalDailyTotal( $producer:producer, $terminal:terminal, $date: date, $cmtTarget : cmtTarget )     \
+    accumulate(          \
+      HaulO( $date.equals(date), $producer == truckRoute.producer, truckRoute.truck.name.contains("CRUDE"), \
+        $terminal == truckRoute.terminal, volume !=null, $value : volume);\
+        $total : sum($value);\
+        $total != $cmtTarget\
+     )\
+  then\
+    int score =  (int)($total - $cmtTarget )/8;\
+    scoreHolder.addSoftConstraintMatch(kcontext, 0, -score*score);  \
+end\
+\
+rule "TruckingRatioSORE"\
+  when\
+    PlanningConstraint( name.equals("TruckingRatioSORE"), active);    \
+    ProducerTerminalDailyTotal(  $producer:producer,  $terminal:terminal, $date: date, $soreTarget : soreTarget)             \
+    accumulate(\
+      HaulO( $date.equals(date), $producer == truckRoute.producer, truckRoute.truck.name.contains("S.O.R.E"),\
+        $terminal == truckRoute.terminal, volume !=null, $value : volume);\
+        $total : sum($value);\
+        $total != $soreTarget\
+    )\
+  then\
+    int score =  (int)($soreTarget  - $total )/9;   \
+    scoreHolder.addSoftConstraintMatch(kcontext, 1, -score*score);  \
+end\
+\
+rule "PlainsRatioCMT"\
+  when\
+    PlanningConstraint( name.equals("PlainsRatios"), active);\
+    $planningDate : LocalDate();\
+\
+    TerminalDailyTotal( $date: date,  !date.isBefore($planningDate), terminal.name.contains("Plains Unity"), $cmttotal : total )  \
+     accumulate(\
+        HaulO( $date.isEqual(date), truckRoute.truck.name.contains("CRUDE"), \
+          truckRoute.terminal.name.contains("Plains Unity"), volume !=null, $value : volume);\
+        $total : sum($value);\
+        $total != ($cmttotal * 0.2 )\
+    )             \
+ \
+  then\
+    int score =  (int)($total - ($cmttotal * 0.2 ) );\
+    scoreHolder.addSoftConstraintMatch(kcontext, 1, -score*score);  \
+end\
+\
+rule "PlainsRatioSORE"\
+  when\
+    PlanningConstraint( name.equals("PlainsRatios"), active);    \
+     $planningDate : LocalDate();\
+    TerminalDailyTotal(  $date: date, !date.isBefore($planningDate), terminal.name.contains("Plains Unity"), $soretotal : total)             \
+accumulate(\
+        HaulO( $date.isEqual(date), truckRoute.truck.name.contains("S.O.R.E"), \
+          truckRoute.terminal.name.contains("Plains Unity"), volume !=null, $value : volume);\
+        $total : sum($value);\
+        $total != ($soretotal * 0.7) \
+    )       \
+\
+  then\
+    int score =  (int)($soretotal*0.7  - $total );   \
+    scoreHolder.addSoftConstraintMatch(kcontext, 1, -score*score);  \
+end\
+\
+\
+//SORE hauls 80% of their Manville loads from Edam?\
+rule "SORE80ToManvilleFromEdam"\
+  when\
+    PlanningConstraint( name.equals("SORE80ToManvilleFromEdam"), active);    \
+    $planningDate : LocalDate();\
+    \
+    $terminal: TerminalO( name.contains("Manville") )\
+    $producer: ProducerO( name.contains("Edam") )\
+    $truck: Truck_CoO( name.contains("S.O.R.E") )\
+            \
+     HaulO( date != null, $date : date,  !date.isBefore($planningDate),\
+        truckRoute.producer==$producer, truckRoute.truck==$truck,  truckRoute.terminal == $terminal, \
+         $volume : volume ); \
+    \
+    accumulate(\
+        HaulO( $date.isEqual(date), \
+            truckRoute.truck==$truck,  truckRoute.terminal == $terminal,\
+            volume !=null, $value : volume);\
+        $total : sum($value);\
+        $volume * 100 < $total * 80\
+    )\
+    \
+    then\
+        int score = $volume * 100 - $total * 80;\
+        scoreHolder.addHardConstraintMatch(kcontext, 0, score/100);  \
+end\
+\
+\
+rule "routeRatability"\
+  when\
+     PlanningConstraint( name.equals("routeRatability"), active);\
+     $planningDate : LocalDate();\
+     HaulO( $route:truckRoute, volume != null,  $total : volume, !date.isBefore($planningDate), $firstDate:date)\
+     TruckRouteMonthTotal( $route == truckRoute, Math.abs($total - avg) > 35, $average : avg )   \
+     not TerminalDailyO( !($firstDate.isBefore(date) || $firstDate.isAfter(untilDate)))\
+  then\
+    int score = ($total - $average)/15;\
+    scoreHolder.addSoftConstraintMatch(kcontext, 1, -score*score);    \
+end\
+\
+rule "truckRatability"\
+  when\
+     PlanningConstraint( name.equals("truckRatability"), active);\
+          $planningDate : LocalDate();\
+     \
+     TruckDailyTotal(  $truck : truck, $total : total, !date.isBefore($planningDate), $firstDate:date)\
+     TruckMonthTotal(  $truck == truck,  Math.abs($total - avg) > 35, $average : avg )   \
+     not TruckDailyO( \
+       !(\
+         $firstDate.isBefore(date) || $firstDate.isAfter(untilDate)\
+       ) \
+     )\
+  then\
+//      System.out.println( $truck.getName()+" "+$firstDate+" "+$average +" "+$total); \
+    int score = ($total - $average)/16;\
+    scoreHolder.addSoftConstraintMatch(kcontext, 1, -score*score);    \
+end\
+\
+rule "terminalRatability"\
+  when\
+     PlanningConstraint( name.equals("terminalRatability"), active);\
+          $planningDate : LocalDate();\
+     \
+     TerminalDailyTotal(  $terminal : terminal, $total : total,!date.isBefore($planningDate), $firstDate:date)\
+     TerminalMonthTotal(  $terminal == terminal, Math.abs($total - avg) > 35, $average : avg)   \
+     not TerminalDailyO( !($firstDate.isBefore(date) || $firstDate.isAfter(untilDate)))\
+  then\
+    int score = ($total - $average)/14;\
+    scoreHolder.addSoftConstraintMatch(kcontext, 1, -score*score);    \
+end\
+\
+rule "salesTargetLow"\
+  when      \
+    PlanningConstraint( name.equals("salesTargetLow"), active);\
+    $planningDate : LocalDate();\
+    SalesTargetO($producer: producer, $target : volume, !date.isBefore($planningDate), $date: date)\
+      accumulate(\
+         HaulO( $producer== truckRoute.producer, volume !=null, $value : volume, date.equals($date) );\
+            $haultotal : sum($value);\
+            $haultotal < $target - 25\
+        )\
+  then\
+       int score = (($haultotal + 25) - $target);\
+       scoreHolder.addHardConstraintMatch(kcontext, 0, score);\
+end\
+\
+rule "salesTargetHigh"\
+  when      \
+    PlanningConstraint( name.equals("salesTargetHigh"), active);\
+    $planningDate : LocalDate();\
+    SalesTargetO($producer: producer, $target : volume, !date.isBefore($planningDate), $date: date)\
+      accumulate(\
+         HaulO( $producer== truckRoute.producer, $value : volume, date.equals($date) );\
+            $haultotal : sum($value);\
+            $haultotal > $target + 25\
+        )\
+  then \
+    int score = ($target + 25) - $haultotal;\
+    scoreHolder.addHardConstraintMatch(kcontext, 0, score);\
+end\
+\
+rule "ProducerTerminalTargetLow"\
+  when\
+      PlanningConstraint( name.equals("ProducerTerminalTarget"), active);\
+  \
+    ProducerTerminalTarget( $producer:producer, $terminal:terminal, $target: total);\
+        $planningDate : LocalDate();\
+    \
+    accumulate(\
+         HaulO( $producer == truckRoute.producer,  $terminal == truckRoute.terminal,volume !=null, $value : volume );\
+            $total : sum($value);\
+             $total < ($target - 70)\
+        )\
+  then\
+    int score = Math.abs($target - $total)-70;\
+    scoreHolder.addSoftConstraintMatch(kcontext, 1, -score/10);\
+end\
+\
+rule "ProducerTerminalTargetHigh"\
+  when\
+        PlanningConstraint( name.equals("ProducerTerminalTarget"), active);\
+  \
+    ProducerTerminalTarget( $producer:producer, $terminal:terminal, $target: total);\
+        $planningDate : LocalDate();\
+    \
+    accumulate(\
+         HaulO( $producer == truckRoute.producer,  $terminal == truckRoute.terminal,volume !=null, $value : volume );\
+            $total : sum($value);\
+            $total > ($target + 70)\
+        )\
+  then\
+    int score = Math.abs($target - $total)-70;\
+    scoreHolder.addSoftConstraintMatch(kcontext, 1, -score/10);\
+end\
+//Erika - April 25, 2022\
+//Could you please set up a rule in the Planner where all loads going to Plains only come from MW?\
+rule "PlainsOnlyFromMW"\
+  when\
+    PlanningConstraint( name.equals("PlainsOnlyFromMW"), active);\
+  \
+    $planningDate : LocalDate();\
+    HaulO( truckRoute.terminal.name.contains("Plains"), !truckRoute.producer.name.equals("Meota West"), \
+      volume !=null,volume > 0, $volume:volume, !date.isBefore($planningDate));            \
+\
+  then\
+    scoreHolder.addHardConstraintMatch(kcontext, 0,  -$volume); \
+end}
